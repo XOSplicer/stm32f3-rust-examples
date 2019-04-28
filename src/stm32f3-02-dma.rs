@@ -20,9 +20,14 @@ use cortex_m_rt::entry;
 use stm32f3::stm32f303;
 use stm32f303::interrupt;
 
+use stm32f3xx_hal::prelude::*;
+use stm32f3xx_hal::delay::Delay;
+
+
 use atomic::Atomic;
 
 mod wavetable;
+use wavetable::WaveTableSampler;
 
 
 // - leds ---------------------------------------------------------------------
@@ -196,42 +201,19 @@ fn DMA2_CH3() {
 
 // - 6. audio callback --------------------------------------------------------
 
-fn linearly_interpolate(wt: &[u16], index: f32) -> u16 {
-    let int_part: usize  = index as usize;
-    let frac_part: f32 = index - int_part as f32;
-    let y0 = wt[int_part] as f32;
-    let y1 = wt[(int_part + 1) % wt.len()] as f32;
-    (y0 + ((y1 - y0) * frac_part)) as u16
+
+lazy_static! {
+    static ref SAMPLER_1: WaveTableSampler = WaveTableSampler::new(&wavetable::SIN, 44_100., 440.);
 }
 
 
 fn audio_callback(buffer: &mut [u32; DMA_LENGTH], length: usize, offset: usize) {
-    lazy_static! {
-        static ref ATOMIC_PHASOR:Atomic<f32>  = Atomic::<f32>::new(0.);
-    }
-    let mut phase = ATOMIC_PHASOR.load(atomic::Ordering::Relaxed);
-
-    let wt_length = wavetable::LENGTH;
-    let wt_sin = wavetable::SIN;
-    let wt_saw = wavetable::SAW;
-
-    let dx = 261.6 * (1. / 44_100.);  // 261.6 Hz = Middle-C
-
     for t in 0..length {
-        let wt_index = phase * wt_length as f32;
-        let channel_1 = linearly_interpolate(&wt_sin, wt_index) as u32;
-        let channel_2 = linearly_interpolate(&wt_saw, wt_index) as u32;
-
+        let channel_1 = SAMPLER_1.sample() as u32;
         let frame = t + (offset * length);
-        buffer[frame] = (channel_2 << 16) + channel_1;
-
-        phase += dx;
-        if phase >= 1.0 {
-            phase -= 1.0;
-        }
+        buffer[frame] = (0 << 16) + channel_1;
     }
 
-    ATOMIC_PHASOR.store(phase, atomic::Ordering::Relaxed);
 }
 
 
@@ -250,14 +232,25 @@ fn main() -> ! {
     init_dac1(&dp);
     init_dma2(&mut cp, &dp);
 
+    let mut flash = dp.FLASH.constrain();
+    let mut rcc = dp.RCC.constrain();
+    let clocks = rcc.cfgr.freeze(&mut flash.acr);
+    let mut delay = Delay::new(cp.SYST, clocks);
+    let dma_move = dp.DMA2;
+    let gpioe_move = dp.GPIOE;
+
     let mut itm = cp.ITM;
     iprintln!(&mut itm.stim[0], "synth-stm32f3 initialized peripherals");
 
+
+
     // wrap shared peripherals
     cortex_m::interrupt::free(|cs| {
-        MUTEX_DMA2.borrow(cs).replace(Some(dp.DMA2));
-        MUTEX_GPIOE.borrow(cs).replace(Some(dp.GPIOE));
+        MUTEX_DMA2.borrow(cs).replace(Some(dma_move));
+        MUTEX_GPIOE.borrow(cs).replace(Some(gpioe_move));
     });
+
+
 
     // enable DMA to start transfer
     cortex_m::interrupt::free(|cs| {
@@ -268,6 +261,9 @@ fn main() -> ! {
 
     // enter main loop
     loop {
-        cortex_m::asm::wfi(); // wait for interrupt
+        delay.delay_ms(1000_u32);
+        SAMPLER_1.set_tone_frequency(440.);
+        delay.delay_ms(1000_u32);
+        SAMPLER_1.set_tone_frequency(880.);
     }
 }

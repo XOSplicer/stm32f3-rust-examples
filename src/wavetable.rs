@@ -1,7 +1,63 @@
-pub const LENGTH: usize = 256;
+use atomic::{Atomic, Ordering};
 
+#[derive(Debug)]
+pub struct WaveTableSampler {
+    wavetable: &'static [u16],
+    sampling_rate: f32,
+    tone_frequency: Atomic<f32>,
+    phase: Atomic<f32>,
+}
+
+
+
+impl WaveTableSampler {
+    #[inline(always)]
+    pub fn new(
+        wavetable: &'static [u16],
+        sampling_rate: f32,
+        tone_frequency: f32,
+    ) -> Self {
+        // assert!(Atomic::<f32>::is_lock_free());
+        WaveTableSampler {
+            wavetable,
+            sampling_rate,
+            tone_frequency: Atomic::new(tone_frequency),
+            phase: Atomic::new(0.0),
+        }
+    }
+    #[inline(always)]
+    fn dx(&self) -> f32 {
+        self.tone_frequency.load(Ordering::Relaxed) * (1. / self.sampling_rate)
+    }
+     #[inline(always)]
+    pub fn sample(&self) -> u16 {
+        let mut phase = self.phase.load(Ordering::Relaxed);
+        let dx = self.dx();
+        let wt_index = phase * self.wavetable.len() as f32;
+        let r = linearly_interpolate(self.wavetable, wt_index);
+        phase += dx;
+        if phase >= 1.0 {
+            phase -= 1.0;
+        }
+        self.phase.store(phase, Ordering::Relaxed);
+        return r;
+    }
+    pub fn set_tone_frequency(&self, tone_frequency: f32) {
+        self.tone_frequency.store(tone_frequency, Ordering::Relaxed);
+    }
+}
+
+fn linearly_interpolate(wt: &[u16], index: f32) -> u16 {
+    let int_part: usize  = index as usize;
+    let frac_part: f32 = index - int_part as f32;
+    let y0 = wt[int_part] as f32;
+    let y1 = wt[(int_part + 1) % wt.len()] as f32;
+    (y0 + ((y1 - y0) * frac_part)) as u16
+}
+
+pub const LENGTH: usize = 256;
 // 256 samples @ 44.1 KHz = 172.265625 Hz
-pub const SIN: [u16; 256] = [
+pub const SIN: [u16; LENGTH] = [
     2047, 2097, 2147, 2198, 2248, 2298, 2347, 2397, 2446, 2496,
     2545,2593, 2641, 2689, 2737, 2784, 2831, 2877, 2922, 2968, 3012,
     3056,3100, 3142, 3185, 3226, 3267, 3307, 3346, 3384, 3422, 3459,
@@ -28,7 +84,7 @@ pub const SIN: [u16; 256] = [
 
 
 // 256 samples @ 44.1 KHz = 172.265625 Hz
-pub const SAW: [u16; 256] = [
+pub const SAW: [u16; LENGTH] = [
     2047, 0, 495, 224, 440, 298, 438, 345, 450, 384, 468, 419, 489,
     452, 512, 483, 536, 514, 560, 544, 585, 573, 610, 602, 636, 631,
     662, 660, 688, 689, 714, 717, 740, 746, 766, 774, 793, 802, 819,
